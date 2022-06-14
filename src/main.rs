@@ -1,7 +1,7 @@
 mod lexer;
 mod parser;
 
-use crate::lexer::{Lexer, Token};
+use crate::lexer::{Lexer, StrLexer, Token};
 use crate::parser::parse_expression;
 use clap::Parser;
 
@@ -13,7 +13,7 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    let lexer = Lexer::new(args.source.as_str());
+    let lexer = StrLexer::new(args.source.as_str());
     match parse_expression(lexer) {
         Ok(expr) => println!("{} = {}", expr, expr.evaluate()),
         Err(err) => {
