@@ -1,4 +1,5 @@
-use crate::Token;
+use crate::lexer::Operator;
+use crate::{Lexer, Token};
 use std::fmt::Formatter;
 use thiserror::Error;
 
@@ -39,24 +40,32 @@ impl std::fmt::Display for Expression {
 #[derive(Debug, Error)]
 pub enum ParserError {
     #[error("Term expected")]
-    TermExpected,
+    TermExpected(usize),
     #[error("Operator expected")]
-    OperatorExpected,
+    OperatorExpected(usize),
 }
 
-pub struct Parser {
-    tokens: Vec<Token>,
-    current: usize,
+impl ParserError {
+    pub fn pos(&self) -> usize {
+        match self {
+            ParserError::TermExpected(pos) | ParserError::OperatorExpected(pos) => *pos,
+        }
+    }
+}
+
+pub struct Parser<'a> {
+    lexer: Lexer<'a>,
 
     token: Token,
+    token_pos: usize,
 }
 
-impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
+impl<'a> Parser<'a> {
+    pub fn new(tokens: Lexer<'a>) -> Self {
         let mut parser = Self {
-            tokens,
-            current: 0,
+            lexer: tokens,
             token: Token::End,
+            token_pos: 0,
         };
 
         parser.next_token();
@@ -65,13 +74,22 @@ impl Parser {
     }
 
     fn next_token(&mut self) {
-        self.token = match self.tokens.get(self.current) {
-            Some(token) => {
-                self.current += 1;
-                *token
+        self.token_pos = self.lexer.pos();
+
+        loop {
+            let token = self.lexer.next_token();
+            match token {
+                Token::Whitespace => {
+                    self.token_pos = self.lexer.pos();
+                    continue;
+                }
+
+                _ => {
+                    self.token = token;
+                    break;
+                }
             }
-            None => Token::End,
-        };
+        }
     }
 
     pub fn parse_expression(&mut self) -> Result<Expression, ParserError> {
@@ -88,15 +106,15 @@ impl Parser {
             match self.token {
                 Token::End => break,
 
-                Token::Plus | Token::Minus | Token::Star | Token::ForwardSlash => {
-                    if self.token.precedence() <= precedence {
+                Token::Operator(_, operator) => {
+                    if operator.precedence() <= precedence {
                         break;
                     }
 
                     left = self.parse_infix_expression(left)?;
                 }
 
-                _ => return Err(ParserError::OperatorExpected),
+                _ => return Err(ParserError::OperatorExpected(self.token_pos)),
             }
         }
 
@@ -107,8 +125,8 @@ impl Parser {
         let mut left = left;
 
         macro_rules! op {
-            ($op:ident) => {{
-                let precedence = self.token.precedence();
+            ($op:ident, $operator:expr) => {{
+                let precedence = $operator.precedence();
                 self.next_token();
                 let right = self.parse_expression_with_precedence(precedence)?;
                 left = Expression::$op(Box::new(left), Box::new(right));
@@ -116,16 +134,18 @@ impl Parser {
         }
 
         match self.token {
-            Token::Plus => op!(Add),
-            Token::Minus => op!(Subtract),
-            Token::Star => op!(Multiply),
-            Token::ForwardSlash => op!(Divide),
+            Token::Operator(_, operator) => match operator {
+                Operator::Plus => op!(Add, operator),
+                Operator::Minus => op!(Subtract, operator),
+                Operator::Multiply => op!(Multiply, operator),
+                Operator::Divide => op!(Divide, operator),
+            },
 
             Token::End => {
                 return Ok(left);
             }
 
-            _ => return Err(ParserError::OperatorExpected),
+            _ => return Err(ParserError::OperatorExpected(self.token_pos)),
         }
 
         Ok(left)
@@ -133,22 +153,52 @@ impl Parser {
 
     fn consume_term(&mut self) -> Result<Expression, ParserError> {
         match self.token {
-            Token::Constant(value) => {
+            Token::Constant(_, value) => {
                 self.next_token();
                 Ok(Expression::Value(value))
             }
-            _ => Err(ParserError::TermExpected),
+            _ => Err(ParserError::TermExpected(self.token_pos)),
         }
     }
+}
+
+pub fn parse_expression(lexer: crate::lexer::Lexer) -> Result<Expression, ParserError> {
+    let mut parser = Parser::new(lexer);
+    parser.parse_expression()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    struct TokenIter {
+        tokens: Vec<Token>,
+        index: usize,
+    }
+
+    impl TokenIter {
+        fn new(tokens: Vec<Token>) -> Self {
+            Self { tokens, index: 0 }
+        }
+    }
+
+    impl Iterator for TokenIter {
+        type Item = Token;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.index >= self.tokens.len() {
+                Some(Token::End)
+            } else {
+                let token = self.tokens[self.index];
+                self.index += 1;
+                Some(token)
+            }
+        }
+    }
+
     macro_rules! assert_expr {
         ($input:expr, $output:expr, $answer:literal) => {{
-            let mut parser = Parser::new($input);
+            let mut parser = Parser::new(TokenIter::new($input));
             let expr = parser.parse_expression().unwrap();
             assert_eq!(expr, $output);
             assert_eq!(expr.evaluate(), $answer);
@@ -163,7 +213,11 @@ mod tests {
     #[test]
     fn single_operator() {
         assert_expr!(
-            vec![Token::Constant(10), Token::Plus, Token::Constant(20)],
+            vec![
+                Token::Constant(10),
+                Token::Operator(Operator::Plus),
+                Token::Constant(20)
+            ],
             Expression::Add(
                 Box::new(Expression::Value(10)),
                 Box::new(Expression::Value(20)),
@@ -172,7 +226,11 @@ mod tests {
         );
 
         assert_expr!(
-            vec![Token::Constant(10), Token::Minus, Token::Constant(20)],
+            vec![
+                Token::Constant(10),
+                Token::Operator(Operator::Minus),
+                Token::Constant(20)
+            ],
             Expression::Subtract(
                 Box::new(Expression::Value(10)),
                 Box::new(Expression::Value(20)),
@@ -181,7 +239,11 @@ mod tests {
         );
 
         assert_expr!(
-            vec![Token::Constant(10), Token::Star, Token::Constant(20)],
+            vec![
+                Token::Constant(10),
+                Token::Operator(Operator::Multiply),
+                Token::Constant(20)
+            ],
             Expression::Multiply(
                 Box::new(Expression::Value(10)),
                 Box::new(Expression::Value(20)),
@@ -192,7 +254,7 @@ mod tests {
         assert_expr!(
             vec![
                 Token::Constant(20),
-                Token::ForwardSlash,
+                Token::Operator(Operator::Divide),
                 Token::Constant(10)
             ],
             Expression::Divide(
@@ -209,9 +271,9 @@ mod tests {
         assert_expr!(
             vec![
                 Token::Constant(1),
-                Token::Minus,
+                Token::Operator(Operator::Minus),
                 Token::Constant(2),
-                Token::Plus,
+                Token::Operator(Operator::Plus),
                 Token::Constant(3),
             ],
             Expression::Add(
@@ -231,9 +293,9 @@ mod tests {
         assert_expr!(
             vec![
                 Token::Constant(1),
-                Token::Minus,
+                Token::Operator(Operator::Minus),
                 Token::Constant(2),
-                Token::Star,
+                Token::Operator(Operator::Multiply),
                 Token::Constant(3),
             ],
             Expression::Subtract(
